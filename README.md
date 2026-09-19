@@ -1,71 +1,61 @@
-# pi-doom-loop-detector
+# pi-doom-loop-detector (tennox fork)
 
-A Pi extension that detects when an LLM gets stuck in a repetitive "doom loop" and automatically injects a recovery prompt to break the cycle.
+A Pi extension that detects when an LLM gets stuck in a repetitive "doom loop" — or in
+token-soup output degeneration — and automatically injects a recovery prompt (and aborts
+the streaming turn).
 
-## What is a Doom Loop?
+Fork of [ThewindMom/pi-doom-loop-detector](https://github.com/ThewindMom/pi-doom-loop-detector)
+(MIT). This fork adds the two detections the upstream detector misses, both observed live:
 
-A "doom loop" occurs when an LLM starts repeating the same phrase or pattern consecutively within a single response — often getting stuck in a cycle like:
+## Fork changes
 
-> "Let me analyze this... Let me analyze this... Let me analyze this..."
+1. **Thinking blocks are scanned** (`scanThinking: true` by default). Degeneration loops
+   happen mostly *inside* thinking, which upstream ignored (it only scans `text` blocks).
+   Text and thinking are scanned separately so a phrase split across block kinds can't
+   inflate the repetition count.
 
-This is common with smaller models. This extension detects these loops in real-time and triggers an automatic recovery so you don't have to manually intervene.
+2. **Garbage / token-soup detection** (`garbageRunChars: 3000` by default). Real incidents
+   look like `GAAsBH,KAE9F1hB,GAAsBH,KAE9F1hB,…` — a 2-token loop with *no whitespace*,
+   repeated 5,651× into a single 103KB thinking block (glm5.3f via litellm, 2026-09-19).
+   Upstream's whitespace tokenizer reads that as ONE enormous "word" and never fires.
+   The fork aborts when any single non-whitespace run exceeds 3,000 chars — real prose
+   and minified code never come close (longest real "tokens" are URLs/hashes).
+
+3. **Stale-ctx guards**: handlers swallow "ctx is stale" errors (pi disposes the runner
+   on /new, /resume, /fork or reload while a run settles — handlers touching `pi.`/`ctx.`
+   must tolerate it).
+
+4. Imports renamed `@mariozechner/pi-*` → `@earendil-works/pi-*` (pi moved packages).
+
+On trigger the extension notifies (`ui.notify` warning), injects a recovery prompt
+(`deliverAs: "followUp"`) — with a degeneration-specific wording for garbage — and
+aborts the current turn. Exact-phrase detection (2–10 word phrases, 3+ consecutive
+repetitions in a 4000-char window) is unchanged from upstream.
 
 ## Installation
 
-Install directly from GitHub:
-
 ```bash
-pi install https://github.com/ThewindMom/pi-doom-loop-detector
+pi install github:tennox/pi-doom-loop-detector
 ```
 
-Or using git protocol:
+or as a pi package dir (`~/.local/share/pi/packages/`) / settings.json `packages` entry.
 
-```bash
-pi install git:github.com/ThewindMom/pi-doom-loop-detector
-```
-
-## Usage
-
-Once installed, the extension runs automatically during Pi sessions. No configuration required.
-
-### What happens when a loop is detected:
-
-1. **Toast notification** — A warning appears showing the repeated phrase and count
-2. **Recovery prompt** — An automatic follow-up message is injected to break the loop
-
-### Example
-
-If the LLM responds with:
-
-```
-I'll fix this now. I'll fix this now. I'll fix this now.
-```
-
-The extension will:
-- Show: `⚠️ Doom loop detected: "I'll fix this now." repeated 3 times`
-- Inject: `"I notice you have been repeating "I'll fix this now." multiple times. Please think from first principles, take a different approach and continue from there."`
-
-## How It Works
-
-The detection algorithm:
-
-1. **Extracts text** from all `assistant` messages
-2. **Scans for repeated phrases** — finds consecutive repetitions of 2-10 word sequences
-3. **Triggers when threshold is met** — 3+ consecutive repetitions of the same phrase
-4. **Notifies and recovers** — shows toast + injects recovery prompt
-
-### Detection Configuration
+## Detection Configuration
 
 | Setting | Value | Description |
 |---------|-------|-------------|
 | Min words | 2 | Catches short phrases like "test phrase" |
 | Max words | 10 | Ignores very long repeated blocks |
 | Threshold | 3 | Requires 3+ consecutive occurrences |
+| Window | 4000 chars | Recent text scanned for phrase loops |
+| Scan thinking | true | Thinking blocks scanned too (per-kind scan) |
+| Garbage run | 3000 chars | Max non-whitespace run before "garbage" abort |
 
-## Requirements
+## Tests
 
-- Node.js >= 18.0.0
-- Pi coding agent >= 0.51.0
+```bash
+node --experimental-strip-types test-fork.ts   # fork additions
+```
 
 ## License
 

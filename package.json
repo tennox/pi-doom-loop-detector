@@ -1,13 +1,16 @@
 {
   "name": "pi-doom-loop-detector",
-  "version": "0.1.0",
-  "description": "Detects doom loops in LLM outputs and enables recovery injection",
+  "version": "0.2.0-tennox",
+  "description": "Detects doom loops and output degeneration in LLM outputs (thinking blocks + garbage token-soup) and enables recovery injection",
   "main": "./index.ts",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ThewindMom/pi-doom-loop-detector.git"
+    "url": "git+https://github.com/tennox/pi-doom-loop-detector.git"
   },
   "author": "The Wind",
+  "contributors": [
+    "manu (github.com/tennox)"
+  ],
   "license": "MIT",
   "keywords": [
     "pi",
@@ -18,9 +21,9 @@
     "ai-agent",
     "loop-detection"
   ],
-  "homepage": "https://github.com/ThewindMom/pi-doom-loop-detector#readme",
+  "homepage": "https://github.com/tennox/pi-doom-loop-detector#readme",
   "bugs": {
-    "url": "https://github.com/ThewindMom/pi-doom-loop-detector/issues"
+    "url": "https://github.com/tennox/pi-doom-loop-detector/issues"
   },
   "pi": {
     "extensions": [
@@ -28,14 +31,14 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": ">=0.51.0",
-    "@mariozechner/pi-agent-core": ">=0.51.0"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-agent-core": "*"
   },
   "peerDependenciesMeta": {
-    "@mariozechner/pi-coding-agent": {
+    "@earendil-works/pi-coding-agent": {
       "optional": true
     },
-    "@mariozechner/pi-agent-core": {
+    "@earendil-works/pi-agent-core": {
       "optional": true
     }
   },
