@@ -15,6 +15,14 @@
  *   thousands of times — no whitespace, so the phrase detector can never see
  *   it) is caught by a longest-non-whitespace-run check and aborts like an
  *   exact loop.
+ * Fork addition (tennox, 2026-09-24):
+ * - byte/hex DATA phrases ("0x55 0x55", "ff ff", "ff:ff:ff") no longer trip at
+ *   the normal threshold (3): a hardware-debug thinking block legitimately
+ *   repeats a byte sequence a few times while walking through a protocol
+ *   (false positive: "0x55 0x55" x3 in a BK7231 bootloader-sync discussion —
+ *   0x55 IS the Beken ROM sync byte being discussed). Data-shaped phrases
+ *   need `dataPhraseThreshold` (default 6) consecutive repeats to trip; real
+ *   degeneration grows unboundedly, prose never repeats a byte string 6x.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -28,7 +36,7 @@ export interface DetectionResult {
 	/** Word count of the repeated phrase */
 	wordCount: number;
 	/** Detection strategy that triggered */
-	kind?: "exact" | "intent" | "cycle" | "garbage";
+	kind?: "exact" | "data" | "intent" | "cycle" | "garbage";
 }
 
 /** Configuration for detection */
@@ -57,6 +65,14 @@ export interface DetectionConfig {
 	 * Set to 0 to disable.
 	 */
 	garbageRunChars?: number;
+	/**
+	 * Consecutive repetitions required for byte/hex DATA phrases
+	 * ("0x55 0x55", "ff ff", MAC-ish strings — see isHexDataToken).
+	 * Technical prose legitimately repeats a discussed byte sequence a few
+	 * times; only degenerate-scale repetition (default: 6) trips.
+	 * Set to the same value as `threshold` to restore pre-2026-09-24 behavior.
+	 */
+	dataPhraseThreshold?: number;
 }
 
 const DEFAULT_CONFIG: Required<DetectionConfig> = {
@@ -67,6 +83,7 @@ const DEFAULT_CONFIG: Required<DetectionConfig> = {
 	maxCycleLength: 4,
 	scanThinking: true,
 	garbageRunChars: 3000,
+	dataPhraseThreshold: 6,
 };
 
 /**
@@ -110,6 +127,29 @@ function tokenize(text: string): string[] {
  */
 function joinWords(words: string[]): string {
 	return words.join(" ");
+}
+
+/**
+ * Byte/hex DATA token: "0x55", "0xAB12", bare hex bytes with at least one
+ * a-f letter ("ff", "ab12", "ff:ff:ff"). The tokenizer keeps punctuation
+ * attached ("0x55," / "(0x55)"), so surrounding punctuation is stripped
+ * first. Pure decimal tokens ("1234", "3") are deliberately NOT data tokens:
+ * bare numbers appear in ordinary prose too often.
+ */
+function isHexDataToken(raw: string): boolean {
+	const word = raw
+		.toLowerCase()
+		.replace(/^[^\p{L}\p{N}]+/u, "")
+		.replace(/[^\p{L}\p{N}]+$/u, "");
+	if (word.startsWith("0x") && /^[0-9a-f]+$/.test(word.slice(2))) return true;
+	if (word.length < 2 || word.length > 12) return false;
+	const bare = word.replace(/[:,]/g, "");
+	return /^[0-9a-f]+$/.test(bare) && /[a-f]/.test(bare);
+}
+
+/** Every word of the phrase is raw byte/hex data, not prose. */
+function isHexDataPhrase(phrase: string): boolean {
+	return phrase.split(" ").every(isHexDataToken);
 }
 
 /**
@@ -175,7 +215,7 @@ export function findRepeatedPhrase(
 	text: string,
 	config: DetectionConfig = {},
 ): DetectionResult | null {
-	const { minWords, maxWords, threshold } = {
+	const { minWords, maxWords, threshold, dataPhraseThreshold } = {
 		...DEFAULT_CONFIG,
 		...config,
 	};
@@ -212,14 +252,18 @@ export function findRepeatedPhrase(
 				}
 			}
 
-			// Check if this beats our best
+			// Check if this beats our best. Byte/hex data phrases (e.g. the sync
+			// bytes an embedded agent is discussing) are quoted data, not narrated
+			// intent — they trip only at degenerate-scale repetition.
 			if (count >= threshold) {
-				if (!bestCandidate || count > bestCandidate.count) {
+				const isData = isHexDataPhrase(phrase);
+				const effThreshold = isData ? dataPhraseThreshold : threshold;
+				if (count >= effThreshold && (!bestCandidate || count > bestCandidate.count)) {
 					bestCandidate = {
 						phrase,
 						count,
 						wordCount: phraseLength,
-						kind: "exact",
+						kind: isData ? "data" : "exact",
 					};
 				}
 			}

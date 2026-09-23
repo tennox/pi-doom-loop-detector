@@ -14,6 +14,11 @@
  *   fork or reload while a run settles — pi disposes the old runner and
  *   handlers touching pi./ctx. must tolerate it)
  * - imports renamed @mariozechner/pi-* → @earendil-works/pi-*
+ * - data-phrase escalation (2026-09-24): byte/hex phrases ("0x55 0x55") are
+ *   quoted DATA in embedded-debug prose, not narrated intent — the
+ *   2026-09-23/24 iot session got 2 recovery injections + aborts from
+ *   "0x55 0x55" x3 in a BK7231 bootloader-sync walkthrough. Data-shaped
+ *   phrases now need 6 consecutive repeats (kind "data").
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -47,6 +52,10 @@ const DETECTION_CONFIG: DetectionConfig = {
 	// have tokens this long (longest real "word" is a URL or hash, far below).
 	// The 2026-09-19 incident produced one 103407-char run before anyone noticed.
 	garbageRunChars: 3000,
+	// Byte/hex DATA phrases ("0x55 0x55", "ff ff") are quoted in hardware-protocol
+	// prose a few times legitimately — only degenerate-scale counts trip (2026-09-24
+	// false positive: "0x55 0x55" x3 aborted a real bootloader-sync debug session).
+	dataPhraseThreshold: 6,
 };
 
 const STALE_CTX = /ctx is stale/i;
@@ -73,7 +82,7 @@ function recoveryPrompt(result: DetectionResult): string {
 		].join(" ");
 	}
 	return [
-		`Repetition pattern detected around: "${result.phrase}".`,
+		`Repetition pattern detected around: "${result.phrase}"${result.kind === "data" ? " (byte/hex data, x" + result.count + ")" : ""}.`,
 		"Stop narrating the same intended action.",
 		"Either perform the next concrete tool call now, or state the blocker in one sentence and choose a different approach.",
 	].join(" ");

@@ -87,6 +87,53 @@ test("scanThinking=false restores upstream behavior", () => {
 	assert(r === null, `thinking should be skipped: ${JSON.stringify(r)}`);
 });
 
+// 2026-09-24 false positive: "0x55 0x55" x3 in a BK7231 bootloader-sync
+// thinking walkthrough aborted a real hardware-debug session. Byte data is
+// quoted, not narrated — needs dataPhraseThreshold (6) to trip.
+const bkThinking = [
+	"The battery is out, LCD shows all elements black — normal for an undriven segment driver.",
+	"The Beken ROM sync = send 0x55 0x55 0x55 0x55 0x55 0x55 at 115200 8E1.",
+	"If the checksum over the blank payload reads ff ff, the erase never happened.",
+	"The link-check packet starts with 0x55 0x55, and blank flash reads back ff ff.",
+	"So: power-cycle, then spam link-check until the ROM answers the 0x55 0x55 sync.",
+].join(" ");
+
+test("hex byte data x3 in prose does NOT trip (the 2026-09-24 false positive)", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: bkThinking }]), cfg);
+	assert(r === null, `false positive: ${JSON.stringify(r)}`);
+});
+
+test("hex byte data at degenerate scale (x6) DOES trip as kind=data", () => {
+	// 18 tokens = 6 consecutive reps of the 3-word phrase (test cfg minWords=3)
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(18) }]), cfg);
+	assert(r?.kind === "data", `want data, got ${JSON.stringify(r)}`);
+	assert(r?.count >= 6, `want count >= 6, got ${r?.count}`);
+});
+
+test("dataPhraseThreshold=threshold restores old behavior for data phrases", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(9) }]), { ...cfg, dataPhraseThreshold: 3 });
+	assert(r?.kind === "data", `want data at x3, got ${JSON.stringify(r)}`);
+});
+
+test("mixed prose sentence repeating 6x still trips as exact (not swallowed by data rule)", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: ("send 0x55 0x55 now. ").repeat(6) }]), cfg);
+	assert(r?.kind === "exact", `want exact, got ${JSON.stringify(r)}`);
+});
+
+test("bare hex with letters like ff/ab trips only at data threshold, mixed prose does not", () => {
+	// ff ff x3 mid-prose: fine
+	const prose = [
+		"blank flash reads ff ff everywhere.",
+		"the CRC bytes came back ff ff.",
+		"so the region is erased, ff ff.",
+	].join(" ");
+	assert(detectDoomLoop(msg([{ type: "thinking", text: prose }]), cfg) === null, "ff ff x3 should pass");
+	// pure-decimal tokens are NOT data tokens: normal threshold applies
+	const dec = "got 1234 units. got 1234 units. got 1234 units.";
+	const rd = detectDoomLoop(msg([{ type: "thinking", text: dec }]), cfg);
+	assert(rd?.kind === "exact", `want exact for decimal phrase, got ${JSON.stringify(rd)}`);
+});
+
 test("findGarbageRun: below threshold returns null", () => {
 	assert(findGarbageRun("GAAsBH,KAE9F1hB,".repeat(50), cfg) === null);
 });
