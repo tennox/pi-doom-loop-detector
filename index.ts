@@ -19,6 +19,12 @@
  *   2026-09-23/24 iot session got 2 recovery injections + aborts from
  *   "0x55 0x55" x3 in a BK7231 bootloader-sync walkthrough. Data-shaped
  *   phrases now need 6 consecutive repeats (kind "data").
+ * - structural-phrase skip (2026-10-09): short fragments made only of
+ *   punctuation/hex/decimal tokens (the httpie nested-GraphQL example
+ *   ("} }" x3), table cell markers ("| N/A" x3), "+ GET" x3 in streamed
+ *   log lines) are quoted output STRUCTURE, not narrated intent — legit
+ *   output repeats them arbitrarily often. Non-data phrases below
+ *   minLetters=4 unicode letters are ignored at any count.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -44,7 +50,11 @@ export type { DetectionResult, DetectionConfig };
 const DETECTION_CONFIG: DetectionConfig = {
 	minWords: 2, // Catch short phrases like "test phrase"
 	maxWords: 10,
-	threshold: 3,
+	// 4, not 3 (raised 2026-10-10): every observed false positive sat at
+	// exactly x3 (three identical quoted table rows / log lines / brace
+	// pairs — legitimate repeated STRUCTURE, not doom). Real degeneration
+	// grows unboundedly; streaming catches a true loop one tick later.
+	threshold: 4,
 	windowChars: 4000,
 	maxCycleLength: 4,
 	scanThinking: true,
@@ -56,6 +66,15 @@ const DETECTION_CONFIG: DetectionConfig = {
 	// prose a few times legitimately — only degenerate-scale counts trip (2026-09-24
 	// false positive: "0x55 0x55" x3 aborted a real bootloader-sync debug session).
 	dataPhraseThreshold: 6,
+	// Structural fragments (punctuation/markup/numeric tokens — brace nests,
+	// markdown tables, log-line prefixes) repeat without bound in legitimate
+	// output. Production runs minWords=2, which made every short structural
+	// fragment a trip hazard (2026-10-09 session: the detector aborted its
+	// own fix session by "discussing" such fragments in the fix prompt).
+	// Anything with < 4 letters is never narrated intent; real doom loops
+	// repeat words, and dense punctuation soup is still caught by the
+	// garbage-run check.
+	minLetters: 4,
 };
 
 const STALE_CTX = /ctx is stale/i;

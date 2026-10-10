@@ -15,13 +15,22 @@
  *   thousands of times — no whitespace, so the phrase detector can never see
  *   it) is caught by a longest-non-whitespace-run check and aborts like an
  *   exact loop.
+ * Fork addition (tennox, 2026-10-09):
+ * - structural/numeric phrases (no real words — think closing braces, table
+ *   cell markers, byte-decimal log lines) repeat ARBITRARILY often in
+ *   legitimate output (JSON nesting, markdown tables, command listings).
+ *   They are quoted structure, never narrated intent, so they are ignored
+ *   below a minimum letter count (minLetters, default 4). Fix for the
+ *   2026-10-09 false-positive class: a 3x closing-brace fragment in an
+ *   httpie GraphQL query aborted a real session; history has 9 more of
+ *   these (table separators, N/A cells, decimal numbers, HTTP verbs).
  * Fork addition (tennox, 2026-09-24):
  * - byte/hex DATA phrases ("0x55 0x55", "ff ff", "ff:ff:ff") no longer trip at
  *   the normal threshold (3): a hardware-debug thinking block legitimately
  *   repeats a byte sequence a few times while walking through a protocol
  *   (false positive: "0x55 0x55" x3 in a BK7231 bootloader-sync discussion —
  *   0x55 IS the Beken ROM sync byte being discussed). Data-shaped phrases
- *   need `dataPhraseThreshold` (default 6) consecutive repeats to trip; real
+ *   need `dataPhraseThreshold` (default 8) consecutive repeats to trip; real
  *   degeneration grows unboundedly, prose never repeats a byte string 6x.
  */
 
@@ -45,7 +54,7 @@ export interface DetectionConfig {
 	minWords?: number;
 	/** Maximum phrase length in words (default: 10) */
 	maxWords?: number;
-	/** Repetition threshold to trigger detection (default: 3) */
+	/** Repetition threshold to trigger detection (default: 4) */
 	threshold?: number;
 	/** Maximum recent text window to inspect (default: 4000 chars) */
 	windowChars?: number;
@@ -69,10 +78,20 @@ export interface DetectionConfig {
 	 * Consecutive repetitions required for byte/hex DATA phrases
 	 * ("0x55 0x55", "ff ff", MAC-ish strings — see isHexDataToken).
 	 * Technical prose legitimately repeats a discussed byte sequence a few
-	 * times; only degenerate-scale repetition (default: 6) trips.
+	 * times; only degenerate-scale repetition (default: 8) trips.
 	 * Set to the same value as `threshold` to restore pre-2026-09-24 behavior.
 	 */
 	dataPhraseThreshold?: number;
+	/**
+	 * Non-data phrases with fewer unicode letters than this are structural
+	 * (pure punctuation/hex/decimals like table markers, brace nests, log
+	 * lines) and are IGNORED at any repetition count: legitimate structured
+	 * output repeats them without bound, they are never narrated intent.
+	 * Dense punctuation soup without any whitespace is still caught by the
+	 * garbage-run check. Default 4; set 0 to restore the pre-2026-10-09
+	 * behavior (any 2+ token phrase could trip).
+	 */
+	minLetters?: number;
 }
 
 const DEFAULT_CONFIG: Required<DetectionConfig> = {
@@ -83,7 +102,15 @@ const DEFAULT_CONFIG: Required<DetectionConfig> = {
 	maxCycleLength: 4,
 	scanThinking: true,
 	garbageRunChars: 3000,
-	dataPhraseThreshold: 6,
+	// 4, not 3 (raised 2026-10-10): every observed false positive sat at
+	// exactly x3 — quoted structured output (three identical table rows,
+	// three identical log lines, three brace pairs) trips x3 all the time,
+	// in normal explanation prose too. Real degeneration loops don't stop
+	// at 3; they grow unboundedly, and streaming catches them at 4 one tick
+	// later. One extra repetition buys a large FP/reality-precision jump.
+	threshold: 4,
+	dataPhraseThreshold: 8,
+	minLetters: 4,
 };
 
 /**
@@ -153,6 +180,14 @@ function isHexDataPhrase(phrase: string): boolean {
 }
 
 /**
+ * Unicode letter count of a phrase. Phrases below `minLetters` are
+ * structural — punctuation/numeric output fragments, not narrated prose.
+ */
+function countLetters(phrase: string): number {
+	return (phrase.match(/\p{L}/gu) ?? []).length;
+}
+
+/**
  * Detect token-soup degeneration: a single run of consecutive
  * non-whitespace characters at least `garbageRunChars` long.
  *
@@ -215,7 +250,7 @@ export function findRepeatedPhrase(
 	text: string,
 	config: DetectionConfig = {},
 ): DetectionResult | null {
-	const { minWords, maxWords, threshold, dataPhraseThreshold } = {
+	const { minWords, maxWords, threshold, dataPhraseThreshold, minLetters } = {
 		...DEFAULT_CONFIG,
 		...config,
 	};
@@ -257,6 +292,9 @@ export function findRepeatedPhrase(
 			// intent — they trip only at degenerate-scale repetition.
 			if (count >= threshold) {
 				const isData = isHexDataPhrase(phrase);
+				// Structural fragments repeat unboundedly in legit structured
+				// output (brace nests, table cells, log lines) — never intent.
+				if (!isData && countLetters(phrase) < minLetters) continue;
 				const effThreshold = isData ? dataPhraseThreshold : threshold;
 				if (count >= effThreshold && (!bestCandidate || count > bestCandidate.count)) {
 					bestCandidate = {

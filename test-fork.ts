@@ -26,6 +26,8 @@ function assert(cond: boolean, msg: string) {
 }
 
 const cfg: DetectionConfig = { ...DEFAULT_CONFIG, garbageRunChars: 1000 };
+// xN helper: DEGEN reps of a phrase at the DEFAULT threshold (4)
+const x4 = (s: string) => s.repeat(4);
 
 function msg(blocks: { type: string; text: string }[]): AgentMessage[] {
 	return [
@@ -37,13 +39,13 @@ function msg(blocks: { type: string; text: string }[]): AgentMessage[] {
 }
 
 test("exact phrase in text block still detected", () => {
-	const r = detectDoomLoop(msg([{ type: "text", text: "I will check the file. I will check the file. I will check the file." }]), cfg);
+	const r = detectDoomLoop(msg([{ type: "text", text: x4("I will check the file. ") }]), cfg);
 	assert(r?.kind === "exact", `want exact, got ${r?.kind}`);
-	assert(r?.count === 3, `want count 3, got ${r?.count}`);
+	assert(r?.count === 4, `want count 4, got ${r?.count}`);
 });
 
 test("exact phrase in THINKING block now detected (fork gap 1)", () => {
-	const r = detectDoomLoop(msg([{ type: "thinking", text: "I will check the file. I will check the file. I will check the file." }]), cfg);
+	const r = detectDoomLoop(msg([{ type: "thinking", text: x4("I will check the file. ") }]), cfg);
 	assert(r?.kind === "exact", `want exact, got ${JSON.stringify(r)}`);
 });
 
@@ -83,7 +85,7 @@ test("real prose with long URL does not trigger", () => {
 });
 
 test("scanThinking=false restores upstream behavior", () => {
-	const r = detectDoomLoop(msg([{ type: "thinking", text: "I will check the file. I will check the file. I will check the file." }]), { ...cfg, scanThinking: false });
+	const r = detectDoomLoop(msg([{ type: "thinking", text: x4("I will check the file. ") }]), { ...cfg, scanThinking: false });
 	assert(r === null, `thinking should be skipped: ${JSON.stringify(r)}`);
 });
 
@@ -103,16 +105,26 @@ test("hex byte data x3 in prose does NOT trip (the 2026-09-24 false positive)", 
 	assert(r === null, `false positive: ${JSON.stringify(r)}`);
 });
 
-test("hex byte data at degenerate scale (x6) DOES trip as kind=data", () => {
-	// 18 tokens = 6 consecutive reps of the 3-word phrase (test cfg minWords=3)
-	const r = detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(18) }]), cfg);
+test("hex byte data at degenerate scale DOES trip as kind=data", () => {
+	// 9-word phrase (3 tokens × dataPhraseThreshold 8) = 24 reps — degenerate
+	// scale; legit prose never repeats a byte string this often
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(24) }]), cfg);
 	assert(r?.kind === "data", `want data, got ${JSON.stringify(r)}`);
-	assert(r?.count >= 6, `want count >= 6, got ${r?.count}`);
+	assert(r?.count >= 8, `want count >= 8, got ${r?.count}`);
 });
 
 test("dataPhraseThreshold=threshold restores old behavior for data phrases", () => {
-	const r = detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(9) }]), { ...cfg, dataPhraseThreshold: 3 });
-	assert(r?.kind === "data", `want data at x3, got ${JSON.stringify(r)}`);
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(12) }]), { ...cfg, dataPhraseThreshold: 4 });
+	assert(r?.kind === "data", `want data at x4, got ${JSON.stringify(r)}`);
+});
+
+test("hex byte data x4 does NOT trip at default dataPhraseThreshold", () => {
+	assert(detectDoomLoop(msg([{ type: "thinking", text: "0x55 ".repeat(12) }]), cfg) === null, "x4 data should pass");
+});
+
+test("3x quoted log/table lines do NOT trip at threshold 4 (degeneration stops at 3; loops don't)", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: (": + GET /health 200\n+ GET /health 200\n+ GET /health 200\nso the route is up") }]), { ...cfg, minWords: 2 });
+	assert(r === null, `false positive: ${JSON.stringify(r)}`);
 });
 
 test("mixed prose sentence repeating 6x still trips as exact (not swallowed by data rule)", () => {
@@ -129,7 +141,7 @@ test("bare hex with letters like ff/ab trips only at data threshold, mixed prose
 	].join(" ");
 	assert(detectDoomLoop(msg([{ type: "thinking", text: prose }]), cfg) === null, "ff ff x3 should pass");
 	// pure-decimal tokens are NOT data tokens: normal threshold applies
-	const dec = "got 1234 units. got 1234 units. got 1234 units.";
+	const dec = "got 1234 units. ".repeat(4);
 	const rd = detectDoomLoop(msg([{ type: "thinking", text: dec }]), cfg);
 	assert(rd?.kind === "exact", `want exact for decimal phrase, got ${JSON.stringify(rd)}`);
 });
@@ -139,8 +151,8 @@ test("findGarbageRun: below threshold returns null", () => {
 });
 
 test("findRepeatedPhrase unchanged for plain text", () => {
-	const r = findRepeatedPhrase("one two three one two three one two three", cfg);
-	assert(r?.kind === "exact" && r.count === 3, JSON.stringify(r));
+	const r = findRepeatedPhrase("one two three ".repeat(4), cfg);
+	assert(r?.kind === "exact" && r.count === 4, JSON.stringify(r));
 });
 
 test("103KB incident-scale soup completes fast and trips", () => {
@@ -151,6 +163,62 @@ test("103KB incident-scale soup completes fast and trips", () => {
 	assert(r?.kind === "garbage", `want garbage, got ${JSON.stringify(r)}`);
 	assert(ms < 500, `too slow: ${ms}ms`);
 	console.log(`   (103KB scan: ${ms.toFixed(1)}ms)`);
+});
+
+// 2026-10-09/10 false-positive class: structural fragments (punctuation /
+// markup / numeric tokens) repeat arbitrarily often in LEGITIMATE output —
+// JSON brace nests, markdown tables, streamed log lines, decimal listings.
+// They are quoted structure, never narrated intent: below minLetters=4 they
+// must not trip at ANY count. (One such fragment aborted the detector's own
+// fix session — the model kept re-quoting the fragment in its discussion.)
+const structuralCfg: DetectionConfig = { ...cfg, minWords: 2 }; // production config
+
+const httpieQuery = "http POST https://x/graphql query='{ __schema { queryType { fields { name args { name type { name kind } } } } } } }'";
+
+const tableProse = [
+	"| service | status | notes |",
+	"| N/A | N/A | N/A |",
+	"| N/A | N/A | N/A |",
+	"| N/A | N/A | N/A |",
+	"all rows empty until auth lands",
+].join("\n");
+
+const logLineProse = [
+	"the proxy emits one line per hop:",
+	"+ GET /health 200",
+	"+ GET /health 200",
+	"+ GET /health 200",
+	"so the route is alive end to end",
+].join("\n");
+
+const decimalProse = [
+	"scores came back stable:",
+	"4.5, 4.5, and 4.5 again across runs",
+	"no drift between the two models",
+	"so we can ship the default unchanged"
+].join("\n");
+
+for (const [name, text] of [
+	["closing-brace fragment x3 in an httpie GraphQL query (the reported FP)", httpieQuery.repeat(2)],
+	["markdown table cell marker repeated (the 2026-10-10 FP)", tableProse],
+	["HTTP-verb log-line prefix repeated", logLineProse],
+	["decimal number fragment repeated", decimalProse],
+] as const) {
+	test(name + " does NOT trip", () => {
+		for (const type of ["text", "thinking"] as const) {
+			assert(detectDoomLoop(msg([{ type, text }]), structuralCfg) === null, `false positive in ${type}: got ${JSON.stringify(detectDoomLoop(msg([{ type, text }]), structuralCfg))}`);
+		}
+	});
+}
+
+test("minLetters=0 restores the old (over-strict) behavior", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "} } ".repeat(4) }]), { ...structuralCfg, minLetters: 0 });
+	assert(r?.kind === "exact", JSON.stringify(r));
+});
+
+test("a WORDY 2-word phrase still trips at 4 (the original minWords=2 motivation)", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: ("test phrase ").repeat(4) }]), structuralCfg);
+	assert(r?.kind === "exact" && r?.count === 4, JSON.stringify(r));
 });
 
 if (failures > 0) {
