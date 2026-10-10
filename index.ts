@@ -75,6 +75,11 @@ const DETECTION_CONFIG: DetectionConfig = {
 	// repeat words, and dense punctuation soup is still caught by the
 	// garbage-run check.
 	minLetters: 4,
+	// Single-char / letterless phrases CAN still be doom loops — repeating
+	// "..." or a symbol forever is degeneration. Legit quoting of structure
+	// (tables, JSON) never approaches this volume (2000 chars of ONE phrase
+	// repeated consecutively), so volume trips regardless of minLetters.
+	repeatedPhraseChars: 2000,
 };
 
 const STALE_CTX = /ctx is stale/i;

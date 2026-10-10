@@ -92,12 +92,20 @@ export interface DetectionConfig {
 	 * behavior (any 2+ token phrase could trip).
 	 */
 	minLetters?: number;
+	/**
+	 * Absolute volume escape hatch (default: 2000): a phrase repeated to
+	 * this many total consecutive characters trips at ANY count, regardless
+	 * of minLetters/dataPhraseThreshold — a model repeating a single
+	 * character (or any letterless fragment) forever is degeneration,
+	 * whereas legit quoting of structure never reaches this volume.
+	 * Set 0 to disable.
+	 */
+	repeatedPhraseChars?: number;
 }
 
 const DEFAULT_CONFIG: Required<DetectionConfig> = {
 	minWords: 3,
 	maxWords: 10,
-	threshold: 3,
 	windowChars: 4000,
 	maxCycleLength: 4,
 	scanThinking: true,
@@ -111,6 +119,7 @@ const DEFAULT_CONFIG: Required<DetectionConfig> = {
 	threshold: 4,
 	dataPhraseThreshold: 8,
 	minLetters: 4,
+	repeatedPhraseChars: 2000,
 };
 
 /**
@@ -250,7 +259,14 @@ export function findRepeatedPhrase(
 	text: string,
 	config: DetectionConfig = {},
 ): DetectionResult | null {
-	const { minWords, maxWords, threshold, dataPhraseThreshold, minLetters } = {
+	const {
+		minWords,
+		maxWords,
+		threshold,
+		dataPhraseThreshold,
+		minLetters,
+		repeatedPhraseChars,
+	} = {
 		...DEFAULT_CONFIG,
 		...config,
 	};
@@ -292,16 +308,25 @@ export function findRepeatedPhrase(
 			// intent — they trip only at degenerate-scale repetition.
 			if (count >= threshold) {
 				const isData = isHexDataPhrase(phrase);
+				const letters = countLetters(phrase);
+				// Volume escape hatch: huge total repeated character volume is
+				// degeneration even for single-char/no-prose fragments — no
+				// legit quoting of structure (tables, JSON) reaches this scale.
+				const volumeTrip =
+					repeatedPhraseChars > 0 && phrase.length * count >= repeatedPhraseChars;
 				// Structural fragments repeat unboundedly in legit structured
 				// output (brace nests, table cells, log lines) — never intent.
-				if (!isData && countLetters(phrase) < minLetters) continue;
-				const effThreshold = isData ? dataPhraseThreshold : threshold;
+				const effThreshold = !volumeTrip && isData
+					? dataPhraseThreshold
+					: !volumeTrip && letters < minLetters
+						? Infinity
+						: threshold;
 				if (count >= effThreshold && (!bestCandidate || count > bestCandidate.count)) {
 					bestCandidate = {
 						phrase,
 						count,
 						wordCount: phraseLength,
-						kind: isData ? "data" : "exact",
+						kind: !volumeTrip && isData ? "data" : "exact",
 					};
 				}
 			}

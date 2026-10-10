@@ -221,6 +221,35 @@ test("a WORDY 2-word phrase still trips at 4 (the original minWords=2 motivation
 	assert(r?.kind === "exact" && r?.count === 4, JSON.stringify(r));
 });
 
+// 2026-10-10: a single character (or any letterless fragment) repeated
+// forever IS a doom loop — the char-volume escape hatch must catch it even
+// though minLetters would otherwise suppress structural phrases entirely.
+test("single character repeated forever trips at volume (2000 chars)", () => {
+	// ".." = 2 chars/rep -> needs 1000 reps
+	const r = detectDoomLoop(msg([{ type: "thinking", text: ((". ".repeat(1400)).trim() + "\n") }]), structuralCfg);
+	assert(r?.kind === "exact" && r?.count >= 700, JSON.stringify(r));
+});
+
+test("letterless fragment at huge consecutive volume trips despite minLetters", () => {
+	// 3-char phrase x701 ≈ 2800 chars chars >= 2000 — a legit table/JSON quoter
+	// never emits 700 consecutive identical fragments
+	const r = detectDoomLoop(msg([{ type: "thinking", text: ("} } ".repeat(701).trim() + "\n") }]), structuralCfg);
+	assert(r?.kind === "exact" && r?.count >= 600, JSON.stringify(r));
+});
+
+test("big-but-legit table (40 x N/A cells) stays under the volume gate", () => {
+	// 40 consecutive cell groups -> phrase "| N/A" len 5 -> 5*12=60 chars per
+	// row; keep total below 2000 across the window: rows of 12 reps = 60 chars
+	const table = Array.from({ length: 10 }, () => "| N/A | N/A | N/A | N/A | N/A | N/A |\n").join("");
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "column audit:\n" + table + "empty until auth lands" }]), structuralCfg);
+	assert(r === null, `false positive: ${JSON.stringify(r)}`);
+});
+
+test("repeatedPhraseChars=0 disables the volume escape hatch", () => {
+	const r = detectDoomLoop(msg([{ type: "thinking", text: "} } ".repeat(701) }]), { ...structuralCfg, repeatedPhraseChars: 0 });
+	assert(r === null, JSON.stringify(r));
+});
+
 if (failures > 0) {
 	console.error(`\n${failures} test(s) FAILED`);
 	process.exit(1);
