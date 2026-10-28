@@ -82,6 +82,12 @@ const DETECTION_CONFIG: DetectionConfig = {
 	repeatedPhraseChars: 2000,
 };
 
+// Stop auto-recovering after this many consecutive degenerate turns with no
+// clean output in between. Each recovery starts a new run, so a model that
+// never re-anchors would otherwise loop forever (detect → abort → recover →
+// detect …). A clean completed message restores the budget.
+const MAX_CONSECUTIVE_RECOVERIES = 3;
+
 const STALE_CTX = /ctx is stale/i;
 
 /** Best-effort wrapper: extension handlers must never throw on a stale ctx. */
@@ -135,11 +141,14 @@ function scanAssistantMessage(
 export default function (pi: ExtensionAPI) {
 	let recoverySent = false;
 	let lastSignature = "";
+	// Recovery stashed while the current turn is aborted; delivered on agent_settled.
+	let pendingRecovery: string | null = null;
+	let consecutiveRecoveries = 0;
+	let recoveryGaveUp = false;
 
 	function maybeRecover(
 		result: DetectionResult | null,
 		ctx: ExtensionContext,
-		deliverAs: "steer" | "followUp",
 		options: { abortCurrentTurn?: boolean } = {},
 	) {
 		if (!result || recoverySent) return;
@@ -147,8 +156,22 @@ export default function (pi: ExtensionAPI) {
 		const signature = `${result.kind ?? "exact"}:${result.phrase}`;
 		if (signature === lastSignature) return;
 
+		if (consecutiveRecoveries >= MAX_CONSECUTIVE_RECOVERIES) {
+			if (!recoveryGaveUp) {
+				recoveryGaveUp = true;
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Output still degenerate after ${MAX_CONSECUTIVE_RECOVERIES} recovery attempts ("${result.phrase}"). Stopping auto-recovery — intervene manually.`,
+						"error",
+					);
+				}
+			}
+			return;
+		}
+
 		recoverySent = true;
 		lastSignature = signature;
+		consecutiveRecoveries++;
 
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -157,7 +180,12 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 
-		pi.sendUserMessage(recoveryPrompt(result), { deliverAs });
+		// Stash the recovery instead of queueing it. A followUp queued right before
+		// ctx.abort() is stranded: the agent-loop's abort path returns before it
+		// drains getFollowUpMessages(), so the message never reaches the model — it
+		// just piles up in the queue. Deliver it on agent_settled as a fresh prompt
+		// (the agent is idle then, so sendUserMessage starts a new run).
+		pendingRecovery = recoveryPrompt(result);
 
 		if (options.abortCurrentTurn && !ctx.isIdle()) {
 			ctx.abort();
@@ -169,6 +197,8 @@ export default function (pi: ExtensionAPI) {
 		fireOn("agent_start", async () => {
 			recoverySent = false;
 			lastSignature = "";
+			// consecutiveRecoveries intentionally NOT reset here: it must survive
+			// across recovery-initiated runs so a never-recovering model is bounded.
 		}),
 	);
 
@@ -182,9 +212,7 @@ export default function (pi: ExtensionAPI) {
 			const result =
 				scanAssistantMessage(event.message, DETECTION_CONFIG, ["text"]) ??
 				scanAssistantMessage(event.message, DETECTION_CONFIG, ["thinking"]);
-			maybeRecover(result, ctx, "followUp", {
-				abortCurrentTurn: true,
-			});
+			if (result) maybeRecover(result, ctx, { abortCurrentTurn: true });
 		}),
 	);
 
@@ -196,7 +224,14 @@ export default function (pi: ExtensionAPI) {
 			const result =
 				scanAssistantMessage(event.message, DETECTION_CONFIG, ["text"]) ??
 				scanAssistantMessage(event.message, DETECTION_CONFIG, ["thinking"]);
-			maybeRecover(result, ctx, "followUp");
+			if (result) {
+				maybeRecover(result, ctx);
+			} else {
+				// A clean completed message = the model produced usable output:
+				// restore the consecutive-recovery budget.
+				consecutiveRecoveries = 0;
+				recoveryGaveUp = false;
+			}
 		}),
 	);
 
@@ -205,7 +240,22 @@ export default function (pi: ExtensionAPI) {
 		"agent_end",
 		fireOn("agent_end", async (event, ctx) => {
 			const result = detectDoomLoop(event.messages, DETECTION_CONFIG);
-			maybeRecover(result, ctx, "followUp");
+			if (result) maybeRecover(result, ctx);
+		}),
+	);
+
+	// Deliver a stashed recovery once the agent is idle. During agent_settled
+	// emission, sendUserMessage is deferred by pi past the settle and run right
+	// after — when the agent is idle — as a fresh prompt, so it reliably reaches
+	// the model even though the turn that triggered it was aborted.
+	pi.on(
+		"agent_settled",
+		fireOn("agent_settled", async () => {
+			if (pendingRecovery === null) return;
+			const prompt = pendingRecovery;
+			pendingRecovery = null;
+			const sent = pi.sendUserMessage(prompt);
+			if (sent instanceof Promise) sent.catch(() => {});
 		}),
 	);
 }
